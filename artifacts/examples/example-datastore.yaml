@@ -1,0 +1,27 @@
+---
+apiVersion: nicolaferraro.me/v1alpha1
+kind: DataStore
+metadata:
+  labels:
+    app: example
+  name: example
+spec:
+  podManagementPolicy: Parallel
+  replicas: 1
+  selector:
+    matchLabels:
+      app: example
+  serviceName: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      containers:
+      - image: alpine:latest
+        command: [ "/bin/sh", "-c", "--" ]
+        args: [ "while true; do echo Hello; sleep 1; done;" ]
+        imagePullPolicy: IfNotPresent
+        name: example
+        securityContext:
+          privileged: false

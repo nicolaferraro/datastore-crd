@@ -1,0 +1,23 @@
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: datastore-controller
+spec:
+  podManagementPolicy: Parallel
+  replicas: 1
+  selector:
+    matchLabels:
+      app: datastore-controller
+  serviceName: datastore-controller
+  template:
+    metadata:
+      labels:
+        app: datastore-controller
+    spec:
+      containers:
+      - image: datastore-controller
+        imagePullPolicy: IfNotPresent
+        name: datastore-controller
+        securityContext:
+          privileged: false
