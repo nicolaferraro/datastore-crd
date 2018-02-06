@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	appslisters "k8s.io/client-go/listers/apps/v1"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
@@ -70,6 +71,8 @@ type Controller struct {
 
 	statefulsetsLister appslisters.StatefulSetLister
 	statefulsetsSynced cache.InformerSynced
+	podsLister corelisters.PodLister
+	podsSynced cache.InformerSynced
 	datastoresLister   listers.DataStoreLister
 	datastoresSynced   cache.InformerSynced
 
@@ -94,6 +97,7 @@ func NewController(
 	// obtain references to shared index informers for the Deployment and DataStore
 	// types.
 	statefulsetInformer := kubeInformerFactory.Apps().V1().StatefulSets()
+	podInformer := kubeInformerFactory.Core().V1().Pods()
 	datastoreInformer := datastoreInformerFactory.Datastore().V1alpha1().DataStores()
 
 	// Create event broadcaster
@@ -111,25 +115,27 @@ func NewController(
 		datastoreclientset: datastoreclientset,
 		statefulsetsLister:  statefulsetInformer.Lister(),
 		statefulsetsSynced: statefulsetInformer.Informer().HasSynced,
+		podsLister: podInformer.Lister(),
+		podsSynced: podInformer.Informer().HasSynced,
 		datastoresLister:   datastoreInformer.Lister(),
 		datastoresSynced:   datastoreInformer.Informer().HasSynced,
-		workqueue:          workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Foos"),
+		workqueue:          workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "DataStores"),
 		recorder:           recorder,
 	}
 
 	glog.Info("Setting up event handlers")
-	// Set up an event handler for when Foo resources change
+	// Set up an event handler for when Datastore resources change
 	datastoreInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.enqueueDatastore,
 		UpdateFunc: func(old, new interface{}) {
 			controller.enqueueDatastore(new)
 		},
 	})
-	// Set up an event handler for when Deployment resources change. This
+	// Set up an event handler for when StatefulSet resources change. This
 	// handler will lookup the owner of the given Deployment, and if it is
-	// owned by a Foo resource will enqueue that Foo resource for
+	// owned by a Datastore resource will enqueue that Datastore resource for
 	// processing. This way, we don't need to implement custom logic for
-	// handling Deployment resources. More info on this pattern:
+	// handling StatefulSet resources. More info on this pattern:
 	// https://github.com/kubernetes/community/blob/8cafef897a22026d42f5e5bb3f104febe7e29830/contributors/devel/controllers.md
 	statefulsetInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: controller.handleObject,
@@ -162,12 +168,12 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 
 	// Wait for the caches to be synced before starting workers
 	glog.Info("Waiting for informer caches to sync")
-	if ok := cache.WaitForCacheSync(stopCh, c.statefulsetsSynced, c.datastoresSynced); !ok {
+	if ok := cache.WaitForCacheSync(stopCh, c.podsSynced, c.statefulsetsSynced, c.datastoresSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
 	glog.Info("Starting workers")
-	// Launch two workers to process Foo resources
+	// Launch two workers to process DataStore resources
 	for i := 0; i < threadiness; i++ {
 		go wait.Until(c.runWorker, time.Second, stopCh)
 	}
@@ -221,7 +227,7 @@ func (c *Controller) processNextWorkItem() bool {
 			return nil
 		}
 		// Run the syncHandler, passing it the namespace/name string of the
-		// Foo resource to be synced.
+		// DataStore resource to be synced.
 		if err := c.syncHandler(key); err != nil {
 			return fmt.Errorf("error syncing '%s': %s", key, err.Error())
 		}
@@ -241,9 +247,10 @@ func (c *Controller) processNextWorkItem() bool {
 }
 
 // syncHandler compares the actual state with the desired, and attempts to
-// converge the two. It then updates the Status block of the Foo resource
+// converge the two. It then updates the Status block of the DataStore resource
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
+
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -251,13 +258,13 @@ func (c *Controller) syncHandler(key string) error {
 		return nil
 	}
 
-	// Get the Foo resource with this namespace/name
+	// Get the DataStore resource with this namespace/name
 	datastore, err := c.datastoresLister.DataStores(namespace).Get(name)
 	if err != nil {
-		// The Foo resource may no longer exist, in which case we stop
+		// The DataStore resource may no longer exist, in which case we stop
 		// processing.
 		if errors.IsNotFound(err) {
-			runtime.HandleError(fmt.Errorf("foo '%s' in work queue no longer exists", key))
+			runtime.HandleError(fmt.Errorf("datastore '%s' in work queue no longer exists", key))
 			return nil
 		}
 
@@ -266,7 +273,7 @@ func (c *Controller) syncHandler(key string) error {
 
 	statefulsetName := datastore.GetObjectMeta().GetName()
 
-	// Get the deployment with the name specified in Foo.spec
+	// Get the deployment with the name specified in DataStore.spec
 	statefulset, err := c.statefulsetsLister.StatefulSets(datastore.Namespace).Get(statefulsetName)
 	// If the resource doesn't exist, we'll create it
 	if errors.IsNotFound(err) {
@@ -280,7 +287,7 @@ func (c *Controller) syncHandler(key string) error {
 		return err
 	}
 
-	// If the Deployment is not controlled by this Foo resource, we should log
+	// If the Deployment is not controlled by this DataStore resource, we should log
 	// a warning to the event recorder and ret
 	if !metav1.IsControlledBy(statefulset, datastore) {
 		msg := fmt.Sprintf(MessageResourceExists, statefulset.Name)
@@ -295,6 +302,7 @@ func (c *Controller) syncHandler(key string) error {
 		glog.V(4).Infof("DataStore %s replicas: %d, statefulset replicas: %d", name, *datastore.Spec.Replicas, *statefulset.Spec.Replicas)
 		statefulset, err = c.kubeclientset.AppsV1().StatefulSets(datastore.Namespace).Update(newStatefulset(datastore))
 	}
+
 
 	// If an error occurs during Update, we'll requeue the item so we can
 	// attempt processing again later. THis could have been caused by a
@@ -311,6 +319,7 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	c.recorder.Event(datastore, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
+
 	return nil
 }
 
@@ -321,16 +330,16 @@ func (c *Controller) updateDatastoreStatus(datastore *datastorev1alpha1.DataStor
 	datastoreCopy := datastore.DeepCopy()
 	datastoreCopy.Status.AvailableReplicas = statefulset.Status.ReadyReplicas
 	// Until #38113 is merged, we must use Update instead of UpdateStatus to
-	// update the Status block of the Foo resource. UpdateStatus will not
+	// update the Status block of the DataStore resource. UpdateStatus will not
 	// allow changes to the Spec of the resource, which is ideal for ensuring
 	// nothing other than resource status has been updated.
 	_, err := c.datastoreclientset.DatastoreV1alpha1().DataStores(datastore.Namespace).Update(datastore)
 	return err
 }
 
-// enqueueFoo takes a Datastore resource and converts it into a namespace/name
+// enqueueDataStore takes a Datastore resource and converts it into a namespace/name
 // string which is then put onto the work queue. This method should *not* be
-// passed resources of any type other than Foo.
+// passed resources of any type other than DataStore.
 func (c *Controller) enqueueDatastore(obj interface{}) {
 	var key string
 	var err error
@@ -342,9 +351,9 @@ func (c *Controller) enqueueDatastore(obj interface{}) {
 }
 
 // handleObject will take any resource implementing metav1.Object and attempt
-// to find the Foo resource that 'owns' it. It does this by looking at the
+// to find the DataStore resource that 'owns' it. It does this by looking at the
 // objects metadata.ownerReferences field for an appropriate OwnerReference.
-// It then enqueues that Foo resource to be processed. If the object does not
+// It then enqueues that DataStore resource to be processed. If the object does not
 // have an appropriate OwnerReference, it will simply be skipped.
 func (c *Controller) handleObject(obj interface{}) {
 	var object metav1.Object
@@ -362,11 +371,12 @@ func (c *Controller) handleObject(obj interface{}) {
 		}
 		glog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
 	}
+	glog.Infof("received object '%s' with name '%s'", object.GetSelfLink(), object.GetName())
 	glog.V(4).Infof("Processing object: %s", object.GetName())
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
-		// If this object is not owned by a Foo, we should not do anything more
+		// If this object is not owned by a DataStore, we should not do anything more
 		// with it.
-		if ownerRef.Kind != "Foo" {
+		if ownerRef.Kind != "DataStore" {
 			return
 		}
 
@@ -381,10 +391,14 @@ func (c *Controller) handleObject(obj interface{}) {
 	}
 }
 
-// newStatefulset creates a new Deployment for a Datastore resource. It also sets
+// newStatefulset creates a new Deployment for a DataStore resource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
-// the Datastore resource that 'owns' it.
+// the DataStore resource that 'owns' it.
 func newStatefulset(datastore *datastorev1alpha1.DataStore) *appsv1.StatefulSet {
+
+	statefulset := datastore.Spec.StatefulSetSpec.DeepCopy()
+	statefulset.Replicas = datastore.Spec.Replicas
+
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      datastore.ObjectMeta.Name,
@@ -397,6 +411,6 @@ func newStatefulset(datastore *datastorev1alpha1.DataStore) *appsv1.StatefulSet 
 				}),
 			},
 		},
-		Spec: datastore.Spec.StatefulSetSpec,
+		Spec: *statefulset,
 	}
 }
