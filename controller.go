@@ -182,7 +182,7 @@ func (c *Controller) updateDeletedPodStatus(pod *corev1.Pod) error {
 								message = "<empty>"
 							}
 							if message == "DECOMMISSIONED" {
-								glog.Infof("Saving pod %s decommission status (true) in datastore %s", pod.Name, datastore.Name)
+								glog.V(4).Infof("Saving pod %s decommission status (true) in datastore %s", pod.Name, datastore.Name)
 								datastore = datastore.DeepCopy()
 								datastore.Status.SetPodTerminationStatus(pod.Name, true)
 								if _, err := c.datastoreclientset.DatastoreV1alpha1().DataStores(datastore.Namespace).Update(datastore); err != nil {
@@ -196,7 +196,7 @@ func (c *Controller) updateDeletedPodStatus(pod *corev1.Pod) error {
 						}
 					}
 
-					glog.Infof("Saving pod %s decommission status (false) in datastore %s", pod.Name, datastore.Name)
+					glog.V(4).Infof("Saving pod %s decommission status (false) in datastore %s", pod.Name, datastore.Name)
 					datastore = datastore.DeepCopy()
 					datastore.Status.SetPodTerminationStatus(pod.Name, false)
 					if _, err := c.datastoreclientset.DatastoreV1alpha1().DataStores(datastore.Namespace).Update(datastore); err != nil {
@@ -215,25 +215,29 @@ func (c *Controller) SignalDecommissionToRequiredPods(datastore *datastorev1alph
 		return err
 	}
 
-	statefulset, err := c.statefulsetsLister.StatefulSets(datastore.Namespace).Get(datastore.Name)
-	if err != nil {
-		return err
-	}
+	glog.V(4).Infof("Found %d pods in the namespace", len(pods))
 
-	replicas := int(*statefulset.Spec.Replicas)
-
-	for _, pod := range pods {
-		if owner := metav1.GetControllerOf(pod); owner != nil && owner.Name == datastore.Name && owner.Kind == statefulset.Kind {
-			num, err := getInstanceNumber(pod, statefulset)
-			if err != nil {
-				glog.Warningf("Pod %s has a wrong instance number", pod.Name, err)
-				continue
-			}
-			if (num >= replicas) {
-				err = c.SignalDecommission(pod.Namespace, pod.Name)
-				if err != nil {
-					glog.Warningf("An error occurred while signalling the decommission to pod %s: %s", pod.Name, err)
-					return err
+	if datastore.Status.FinalReplicas != nil {
+		replicas := int(*datastore.Status.FinalReplicas)
+		for _, pod := range pods {
+			glog.V(4).Infof("Analyzing pod %s", pod.Name)
+			if owner := metav1.GetControllerOf(pod); owner != nil {
+				glog.V(4).Infof("Found pod %s with owner %s == %s and owner type %s == %s", pod.Name, owner.Name, datastore.Name, owner.Kind, "StatefulSet")
+				if owner.Name == datastore.Name && owner.Kind == "StatefulSet" {
+					glog.V(4).Infof("Pod %s is owned", pod.Name)
+					num, err := getInstanceNumberString(pod, datastore.Name)
+					if err != nil {
+						glog.Warningf("Pod %s has a wrong instance number", pod.Name, err)
+						continue
+					}
+					glog.V(4).Infof("Pod %s has instance number %d, target replicas is %d", pod.Name, num, replicas)
+					if (num >= replicas) {
+						err = c.SignalDecommission(pod.Namespace, pod.Name)
+						if err != nil {
+							glog.Warningf("An error occurred while signalling the decommission to pod %s: %s", pod.Name, err)
+							return err
+						}
+					}
 				}
 			}
 		}
@@ -242,12 +246,17 @@ func (c *Controller) SignalDecommissionToRequiredPods(datastore *datastorev1alph
 }
 
 func getInstanceNumber(p *corev1.Pod, s *appsv1.StatefulSet) (int, error) {
-	numStr := strings.TrimPrefix(p.Name, s.Name + "-")
+	return getInstanceNumberString(p, s.Name)
+}
+
+func getInstanceNumberString(p *corev1.Pod, s string) (int, error) {
+	numStr := strings.TrimPrefix(p.Name, s + "-")
 	return strconv.Atoi(numStr)
 }
 
 func (c *Controller) SignalDecommission(namespace string, podName string) error {
-	return c.ExecuteCommand(namespace, podName, []string{"touch", "/dev/decommission-requested"})
+	glog.Infof("Signalling decommission to pod %s", podName)
+	return c.ExecuteCommand(namespace, podName, []string{"touch", "/tmp/decommission-requested"})
 }
 
 func (c *Controller) ExecuteCommand(namespace string, podName string, command []string) error {
@@ -373,14 +382,14 @@ func (c *Controller) processNextWorkItem() bool {
 			if err := c.syncHandler(key); err != nil {
 				return fmt.Errorf("error syncing '%s': %s", key, err.Error())
 			}
-			glog.Infof("Successfully synced '%s'", key)
+			glog.V(4).Infof("Successfully synced '%s'", key)
 			return nil
 		} else {
 			// Run the handlePod termination
 			if err := c.updateDeletedPodStatus(pod); err != nil {
 				return fmt.Errorf("error processing pod '%s': %s", pod, err.Error())
 			}
-			glog.Infof("Successfully processed pod '%s'", pod)
+			glog.V(4).Infof("Successfully processed pod '%s'", pod)
 			return nil
 		}
 	}(obj)
@@ -397,7 +406,7 @@ func (c *Controller) processNextWorkItem() bool {
 // converge the two. It then updates the Status block of the DataStore resource
 // with the current status of the resource.
 func (c *Controller) syncHandler(key string) error {
-	glog.Infof("Sync called for key %s", key)
+	glog.V(4).Infof("Sync called for key %s", key)
 
 	// Convert the namespace/name string into a distinct namespace and name
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
@@ -446,7 +455,8 @@ func (c *Controller) syncHandler(key string) error {
 	if !datastore.Status.ScalingDown && !datastore.Status.RestartScaling {
 		if datastore.Spec.Replicas != nil && *datastore.Spec.Replicas > *statefulset.Spec.Replicas {
 			glog.V(4).Infof("DataStore %s replicas: %d, statefulset replicas: %d", name, *datastore.Spec.Replicas, *statefulset.Spec.Replicas)
-			statefulset, err = c.kubeclientset.AppsV1().StatefulSets(datastore.Namespace).Update(newStatefulset(datastore))
+			statefulset, err = c.updateStatefulset(datastore.Namespace, newStatefulset(datastore))
+			c.recorder.Event(datastore, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 		} else if datastore.Spec.Replicas != nil && *datastore.Spec.Replicas < *statefulset.Spec.Replicas {
 			// Start scaling down process
 			glog.V(4).Infof("DataStore %s replicas: %d, statefulset replicas: %d", name, *datastore.Spec.Replicas, *statefulset.Spec.Replicas)
@@ -456,14 +466,14 @@ func (c *Controller) syncHandler(key string) error {
 	} else if datastore.Status.ScalingDown {
 
 		if (*datastore.Status.FinalReplicas != *statefulset.Spec.Replicas) {
-			glog.Warningf("Statefulset %s status inconsistent. Scaling to %d replicas", statefulset.Name, datastore.Status.FinalReplicas)
+			glog.Warningf("Statefulset %s status inconsistent. Scaling to %d replicas", statefulset.Name, *datastore.Status.FinalReplicas)
 			datastore, statefulset, err = c.startScalingDown(datastore, statefulset)
 		} else {
 			// StatefulSet has been already requested to scale down
 			if *datastore.Status.Replicas == *datastore.Status.FinalReplicas {
 				// reached the desired point, checking if pod is terminated
 				lastPodName := statefulset.Name + "-" + strconv.Itoa(int((*datastore.Status.FinalReplicas)))
-				glog.Infof("Wating for pod %s to be deleted", lastPodName)
+				glog.V(4).Infof("Wating for pod %s to be deleted", lastPodName)
 				if lastPod, _ := c.podsLister.Pods(datastore.Namespace).Get(lastPodName); lastPod == nil {
 					decommissioned := true
 					for i := int(*datastore.Status.FinalReplicas); i<int(*datastore.Status.InitialReplicas); i++ {
@@ -492,6 +502,7 @@ func (c *Controller) syncHandler(key string) error {
 							glog.Warningf("Unable to finish scaling down the DataStore %s: %s", datastore.Name, err)
 							return err
 						}
+						c.recorder.Event(datastore, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 					} else {
 						datastore, statefulset, err = c.restartScaling(datastore, statefulset)
 					}
@@ -521,18 +532,16 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	if datastore.Status.Replicas == nil || datastore.Status.ReadyReplicas == nil || *datastore.Status.Replicas != statefulset.Status.Replicas || *datastore.Status.ReadyReplicas != statefulset.Status.ReadyReplicas {
-		glog.Infof("StatefulSet %s status not synchronized", statefulset.Name)
+		glog.V(4).Infof("StatefulSet %s status not synchronized", statefulset.Name)
 		datastore, err = c.updateDatastore(datastore, func(s *datastorev1alpha1.DataStore) {
 			s.Status.Replicas = &statefulset.Status.Replicas
 			s.Status.ReadyReplicas = &statefulset.Status.ReadyReplicas
 		})
 		if err != nil {
-			glog.Warningf("Unable to synchronize replicase of DataStore %s: %s", datastore.Name, err)
+			glog.Warningf("Unable to synchronize replicas of DataStore %s: %s", datastore.Name, err)
 			return err
 		}
 	}
-
-	c.recorder.Event(datastore, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 
 	return nil
 }
@@ -545,7 +554,7 @@ func (c *Controller) startScalingDown(datastore *datastorev1alpha1.DataStore, st
 	}
 
 	initialReplicas := statefulset.Spec.Replicas
-	statefulset, err = c.kubeclientset.AppsV1().StatefulSets(datastore.Namespace).Update(newStatefulset(datastore))
+	statefulset, err = c.updateStatefulset(datastore.Namespace, newStatefulset(datastore))
 	if err != nil {
 		glog.Warningf("Unable to update the stateful set %s: %s", statefulset.Name, err)
 		return datastore, statefulset, err
@@ -569,7 +578,7 @@ func (c *Controller) startScalingDown(datastore *datastorev1alpha1.DataStore, st
 func (c *Controller) restartScaling(datastore *datastorev1alpha1.DataStore, statefulset *appsv1.StatefulSet) (*datastorev1alpha1.DataStore, *appsv1.StatefulSet, error) {
 	newStatefulset := newStatefulset(datastore)
 	newStatefulset.Spec.Replicas = datastore.Status.InitialReplicas
-	statefulset, err := c.kubeclientset.AppsV1().StatefulSets(datastore.Namespace).Update(newStatefulset)
+	statefulset, err := c.updateStatefulset(datastore.Namespace, newStatefulset)
 	if err != nil {
 		glog.Warningf("Unable to update the stateful set %s: %s", statefulset.Name, err)
 		return datastore, statefulset, err
@@ -602,7 +611,16 @@ func (c *Controller) enqueueDatastore(obj interface{}) {
 	c.workqueue.Enqueue(key)
 }
 
+func (c *Controller) updateStatefulset(namespace string, statefulset *appsv1.StatefulSet) (*appsv1.StatefulSet, error) {
+	// avoid api rate limiting
+	//time.Sleep(200)
+	return c.kubeclientset.AppsV1().StatefulSets(namespace).Update(statefulset)
+}
+
 func (c *Controller) updateDatastore(datastore *datastorev1alpha1.DataStore, change func(store *datastorev1alpha1.DataStore)) (*datastorev1alpha1.DataStore, error) {
+	// avoid api rate limiting
+	//time.Sleep(200)
+
 	// NEVER modify objects from the store. It's a read-only, local cache.
 	// You can use DeepCopy() to make a deep copy of original object and modify this copy
 	// Or create a copy manually for better performance
@@ -643,7 +661,7 @@ func (c *Controller) handleObject(obj interface{}) {
 		}
 		glog.V(4).Infof("Recovered deleted object '%s' from tombstone", object.GetName())
 	}
-	glog.Infof("received object '%s' with name '%s'", object.GetSelfLink(), object.GetName())
+	glog.V(4).Infof("received object '%s' with name '%s'", object.GetSelfLink(), object.GetName())
 	glog.V(4).Infof("Processing object: %s", object.GetName())
 	if ownerRef := metav1.GetControllerOf(object); ownerRef != nil {
 		// If this object is not owned by a DataStore, we should not do anything more
