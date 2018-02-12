@@ -43,7 +43,58 @@ type DataStoreSpec struct {
 
 // DataStoreStatus is the status for a Datastore resource
 type DataStoreStatus struct {
-	AvailableReplicas int32 `json:"availableReplicas"`
+	Replicas 				*int32							`json:"availableReplicas"`
+	ReadyReplicas 			*int32							`json:"readyReplicas"`
+	ScalingDown				bool							`json:"scalingDown"`
+	RestartScaling			bool							`json:"restartScaling"`
+	InitialReplicas			*int32							`json:"initialReplicas"`
+	FinalReplicas			*int32							`json:"finalReplicas"`
+	PodTerminationStatuses	[]DataStorePodTerminationStatus	`json:"podTerminationStatuses"`
+}
+
+func (s *DataStoreStatus) SetPodTerminationStatus(name string, decommissioned bool) {
+	for _, status := range s.PodTerminationStatuses {
+		if status.PodName == name {
+			status.Decommissioned = decommissioned
+			return;
+		}
+	}
+
+
+	edited := append(s.PodTerminationStatuses, DataStorePodTerminationStatus{
+		PodName:name,
+		Decommissioned:decommissioned,
+	})
+	s.PodTerminationStatuses = edited
+}
+
+func (s *DataStoreStatus) GetPodTerminationStatus(name string) *DataStorePodTerminationStatus {
+	for _, status := range s.PodTerminationStatuses {
+		if status.PodName == name {
+			return &status
+		}
+	}
+	return nil
+}
+
+func (s *DataStoreStatus) RemovePodTerminationStatus(name string) {
+	index := -1
+	for i, status := range s.PodTerminationStatuses {
+		if status.PodName == name {
+			index = i
+			break
+		}
+	}
+
+	if index >= 0 {
+		edited := append(s.PodTerminationStatuses[:index], s.PodTerminationStatuses[index + 1:]...)
+		s.PodTerminationStatuses = edited
+	}
+}
+
+type DataStorePodTerminationStatus struct {
+	PodName			string
+	Decommissioned	bool
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
